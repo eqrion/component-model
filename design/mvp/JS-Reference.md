@@ -152,7 +152,7 @@ We define `PascalCase(label)` and `CamelCase(label)` below.
 | `URL` | `URL` | `url` |
 | `a1-2-3` | `A123` | `a123` |
 
-Every `plainname` matches exactly one of the four patterns below, and no `interfacename` matches any of them. The algorithms in this document dispatch on these patterns and read their named captures. `<label>` stands for the [`label`](Explainer.md#import-and-export-definitions) production.
+Every `plainname` matches exactly one of the four patterns below, after first replacing a name that matches *Overload* with its base name, the concatenation of its `prefix` and `rest` captures. No `interfacename` matches any of them. The algorithms in this document dispatch on these patterns and read their named captures. `<label>` stands for the [`label`](Explainer.md#import-and-export-definitions) production.
 
 | Pattern | Regex | Groups | Example |
 |---|---|---|---|
@@ -160,10 +160,13 @@ Every `plainname` matches exactly one of the four patterns below, and no `interf
 | *Property* | `^\[(get\|set)\](<label>)$` | 1: `accessor`, 2: `name` | `[get]inner-HTML` |
 | *Constructor* | `^\[constructor\](<label>)$` | 1: `resource` | `[constructor]element` |
 | *Member* | `^\[(method\|static)\](\[(get\|set)\])?(<label>)\.(<label>)$` | 1: `scope`, 3: `accessor`, 4: `resource`, 5: `name` | `[method][set]element.inner-HTML` |
+| *Overload* | `^(\[(constructor\|method\|static)\])?\[overload\](.+)\.(<label>)$` | 1: `prefix`, 3: `rest`, 4: `suffix` | `[method][overload]context.fill.with-path` |
 
 `plainname`'s are restricted by component [strong uniqueness](./Explainer.md#name-uniqueness). This helps us statically avoid collisions when building high-level export types (such as [guest resource classes](#guest-resource-classes)) and using the name transformations below.
 
 `LabelOf`(|name|), where |name| is a `plainname`, returns the label that names the definition in JS:
+1. If |name| matches *Overload*:
+    1. Return `LabelOf`(its base name).
 1. If |name| matches *Constructor*:
     1. Return the `resource` capture.
 1. Return the `name` capture.
@@ -190,6 +193,8 @@ Every `plainname` matches exactly one of the four patterns below, and no `interf
     1. Set |result| to the string-concatenation of |result| and `Capitalize`(|fragment|).
 1. Return |result|.
 
+The *overload set* of a function import or export |decl| is the List of function declarations in the same scope whose names form an [overload set](Explainer.md#import-and-export-definitions) with |decl|.Name, in declaration order. If |decl|.Name does not match *Overload*, it is « |decl| ». All declarations in an overload set have the same `JSName`, so an imported overload set reads the same JS value once per overload, and an exported one becomes one JS function.
+
 The JS name of an import or export declaration is then:
 
 `JSName`(|decl|):
@@ -212,7 +217,7 @@ This section specifies that translation as two abstract operations:
 Roundtripping from `ToJSValue` back through `ToComponentValue` is designed to be strictly the identity function with the following exceptions:
   1. A `map` with duplicate keys keeps only the last pair per key (see [`ToJSValueMap`](#tojsvalue))
   1. Float NaNs are [canonicalized](CanonicalABI.md#loading)
-  1. A `union` value where imported resources overlap. See [`SelectUnionCase`](#tocomponentvalue).
+  1. A `union` value where imported resources overlap. See [`SelectDistinguishableType`](#tocomponentvalue).
 
 Every object a conversion creates, including any error it throws, belongs to the *component realm*. This is the realm of the `WebAssembly` namespace the component was instantiated through with the JS-API, or the realm the ESM was instantiated in with ESM-integration.
 
@@ -480,30 +485,31 @@ This operation is used for variant, and also cases in the above table where we c
 If the value is not iterable, we fall back to converting the object the way WebIDL's [`record<USVString, V>`](https://webidl.spec.whatwg.org/#js-record) would, for compatibility.
 
 `ToComponentValueUnion(jsValue, cases)`:
-1. Let |case| be ? `SelectUnionCase`(|jsValue|, |cases|).
+1. Let |i| be ? `SelectDistinguishableType`(|jsValue|, the payload types of |cases|).
+1. Let |case| be |cases|[|i|].
 1. Let |payload| be ? `ToComponentValue`(|jsValue|, the payload type of |case|).
 1. Return a union value of |case| whose payload is |payload|.
 
-`SelectUnionCase(jsValue, cases)`:
+`SelectDistinguishableType(jsValue, types)` returns the index of the type in |types| that |jsValue| converts to, using their [distinguishable kinds](Explainer.md#union-types):
 1. If |jsValue| is an Object:
-    1. For each case with a resource kind `R`, in declaration order:
+    1. For each type of |types| in order, and each resource kind `R` of that type in order:
         1. If ? `IsResourceValue`(|jsValue|, R) is **true**:
-            1. Return that case.
-    1. If |jsValue| has a [[MapData]] internal slot, and a case has a payload type of `map<K, V>`:
-        1. Return that case.
-    1. If a case has the list kind and ? `GetMethod`(|jsValue|, `%Symbol.iterator%`) is not **undefined**:
-        1. Return that case.
-    1. If a case has the object kind:
-        1. Return that case.
-1. If |jsValue| is a Boolean, Number or BigInt, and a case has the numeric kind:
-    1. Return that case.
-1. If a case has the string kind:
-    1. Return that case.
-1. If a case has the numeric kind:
-    1. Return that case.
+            1. Return the index of that type.
+    1. If |jsValue| has a [[MapData]] internal slot, and a type is `map<K, V>` or a `union` with a `map<K, V>` case:
+        1. Return the index of that type.
+    1. If a type has the list kind and ? `GetMethod`(|jsValue|, `%Symbol.iterator%`) is not **undefined**:
+        1. Return the index of that type.
+    1. If a type has the object kind:
+        1. Return the index of that type.
+1. If |jsValue| is a Boolean, Number or BigInt, and a type has the numeric kind:
+    1. Return the index of that type.
+1. If a type has the string kind:
+    1. Return the index of that type.
+1. If a type has the numeric kind:
+    1. Return the index of that type.
 1. Throw a `TypeError`.
 
-Validation ensures at most one case has a given kind, except for resource kinds when instantiation supplies the same resource type for two imports
+Validation ensures at most one type has a given kind, except for resource kinds when instantiation supplies the same resource type for two imports
 
 The `[[MapData]]` test comes before the iterable test because a `Map` is iterable, but `ToJSValue` produces it for a `map`.
 
@@ -642,24 +648,25 @@ A unique JS *guest resource class* is created for each exported [abstract type](
 
 A guest resource class is a built-in function object with the following slots:
 1. [[ResourceType]] - the guest resource type.
-1. [[ConstructorFunc]] - the component function that implements `new`, or **empty**.
+1. [[ConstructorFuncs]] - the overload set of component functions that implement `new`, or **empty**.
 1. [[Instance]] - the [instance record](#instance-records) the class belongs to.
 
 To `create a guest resource class` given an instance record |instance|, a list of export declarations |exportDecls|, resource type |resourceType|, String |name| and an integer |arity|:
 1. Let |prototype| be `OrdinaryObjectCreate`(`%Object.prototype%`).
 1. Let |constructor| be a built-in function object with name |name| and length |arity|.
 1. Set |constructor|.[[ResourceType]] to |resourceType|.
-1. Set |constructor|.[[ConstructorFunc]] to **empty**.
+1. Set |constructor|.[[ConstructorFuncs]] to **empty**.
 1. Set |constructor|.[[Instance]] to |instance|.
 1. Set |constructor|'s [[Call]] behaviour to throw a `TypeError`.
 1. Set |constructor|'s [[Construct]] behaviour, given JS arguments |args| and |newTarget|, to perform:
-    1. If |constructor|.[[ConstructorFunc]] is **empty**:
+    1. If |constructor|.[[ConstructorFuncs]] is **empty**:
         1. Throw a `TypeError`.
     1. Let |proto| be ? `Get`(|newTarget|, "prototype").
     1. If `Type`(|proto|) is not Object:
         1. Set |proto| to |prototype|.
     1. Let |rep| be ? `run within a call` given |instance|.[[HostResourceTypes]], |instance|.[[GuestResourceClasses]], and the following steps:
-        1. Return ? `invoke a component function` given |instance|, |constructor|.[[ConstructorFunc]], **false**, **undefined** and |args|.
+        1. Let |func| be ? `SelectOverload`(|constructor|.[[ConstructorFuncs]], **false**, |args|).
+        1. Return ? `invoke a component function` given |instance|, |func|, **false**, **undefined** and |args|.
     1. Return `create an own guest resource object` given |constructor|, |rep| and |proto|.
 1. Let |disposeFunc| be a built-in function object with name "[Symbol.dispose]" and length 0 that performs `dispose a guest resource object` given its **this** value.
 1. Perform `DefinePropertyOrThrow`(|prototype|, `%Symbol.dispose%`, PropertyDescriptor { [[Value]]: |disposeFunc|, [[Writable]]: **true**, [[Enumerable]]: **false**, [[Configurable]]: **true** }).
@@ -668,10 +675,9 @@ To `create a guest resource class` given an instance record |instance|, a list o
 1. Perform `DefinePropertyOrThrow`(|constructor|, "prototype", PropertyDescriptor { [[Value]]: |prototype|, [[Writable]]: **false**, [[Enumerable]]: **false**, [[Configurable]]: **false** }).
 1. Let |members| be the function exports of |exportDecls| whose names match *Constructor* or *Member* with a `resource` capture naming |resourceType|.
 1. If some |c| of |members| matches *Constructor*:
-    1. Assert: there is only one by validation rules.
-    1. Set |constructor|.[[ConstructorFunc]] to |c|.Func.
+    1. Set |constructor|.[[ConstructorFuncs]] to the Funcs of the overload set of |c|.
 1. For each |e| of |members| matching *Member*, in declaration order:
-    1. If `JSName`(|e|) is in `reserved class members`:
+    1. If `JSName`(|e|) is in `reserved class members`, or |e| is not the first declaration of its overload set:
         1. Continue.
     1. If |e|.Name's `scope` capture is "method":
         1. Let |target| be |prototype|.
@@ -683,7 +689,7 @@ To `create a guest resource class` given an instance record |instance|, a list o
     1. If |e|.Name has an `accessor` capture:
         1. Perform `define an accessor for a component function` given |instance|, |target|, |e| and **false**.
     1. Else:
-        1. Let |func| be `create a JS function for a component function` given |instance|, |e|.Func, `JSName`(|e|) and |takesSelf|.
+        1. Let |func| be `create a JS function for a component function` given |instance|, the Funcs of the overload set of |e|, `JSName`(|e|) and |takesSelf|.
         1. Perform `DefinePropertyOrThrow`(|target|, `JSName`(|e|), PropertyDescriptor { [[Value]]: |func|, [[Writable]]: **true**, [[Enumerable]]: **false**, [[Configurable]]: **true** }).
 1. Return |constructor|.
 
@@ -902,7 +908,7 @@ To `read the type import` given |importDecl|, |importValue|, and |hostResourceTy
 1. Assert: |hostResourceTypes|[|abstractTypeKey|] does not exist. (`read a scope of imports` handles transparent imports)
 1. If `IsCallable`(|importValue|) is **false**:
     1. Throw a `WebAssembly.LinkError`.
-1. If |importValue| has a [[ConstructorFunc]] internal slot:
+1. If |importValue| has a [[ConstructorFuncs]] internal slot:
     1. Assert: |importValue| is a [guest resource class](#guest-resource-classes).
     1. Throw a `WebAssembly.LinkError`.
 1. Let |dispose| be **undefined**.
@@ -1046,7 +1052,7 @@ TODO: Within the wasm scheme we're parsing this similar to a general URL, but no
 The `create the exports object` algorithm walks the component's exports and builds a fresh JS object whose properties are the exports.
 
 Exported resource types become [guest resource classes](#guest-resource-classes) named `JSName`(|export|), and function exports matching *Constructor* or *Member* are mapped onto the class `R` named by their `resource` capture, just as in `read the imports object`:
-- *Constructor*: the function becomes `R`'s constructor behaviour. Names are strongly-unique, so there can only be one.
+- *Constructor*: the function becomes `R`'s constructor behaviour. Names are strongly-unique, so there can only be one, or one overload set.
 - *Member* with `scope` "method": the function becomes a method named `JSName`(|export|) on `R.prototype`.
 - *Member* with `scope` "static": the function becomes a static method named `JSName`(|export|) on `R`.
 - *Member* with an `accessor` capture: the "get" and "set" functions become the getter and setter of one accessor property named `JSName`(|export|), again on `R.prototype` or on `R`.
@@ -1066,7 +1072,7 @@ To `create guest resource classes` given an [instance record](#instance-records)
     1. If |guestResourceClasses|[|abstractTypeKey|] exists:
         1. Continue.
     1. Let |resourceType| be the component resource type |export| refers to.
-    1. Let |arity| be the parameter count of the export of |exportDecls| whose name matches *Constructor* with a `resource` capture naming |export|, or 0 if there is none.
+    1. Let |arity| be the smallest parameter count of the exports of |exportDecls| whose names match *Constructor* with a `resource` capture naming |export|, or 0 if there are none.
     1. Let |class| be `create a guest resource class` given |instance|, |exportDecls|, |resourceType|, `JSName`(|export|) and |arity|.
     1. Set |guestResourceClasses|[|abstractTypeKey|] to |class|.
 
@@ -1090,7 +1096,9 @@ To `create the exports object` given an [instance record](#instance-records) |in
             1. Let |abstractTypeKey| be the *abstract type key* of |export|.
             1. Let |value| be |instance|.[[GuestResourceClasses]][|abstractTypeKey|].
         1. **func**:
-            1. Let |value| be `create a JS function for a component function` given |instance|, |export|.Func, |key| and **false**.
+            1. If |export| is not the first declaration of its overload set:
+                1. Continue.
+            1. Let |value| be `create a JS function for a component function` given |instance|, the Funcs of the overload set of |export|, |key| and **false**.
         1. **value**:
             1. Let |value| be `run within a call` given |instance|.[[HostResourceTypes]], |instance|.[[GuestResourceClasses]], and a new Abstract Closure that performs the following steps when called:
                 1. Return `ToJSValue`(|export|.Value, |export|.Type).
@@ -1104,25 +1112,43 @@ To `create the exports object` given an [instance record](#instance-records) |in
 
 TODO: We need a JSName for members that hit the `reserved class members` list. It needs to concatenate the resource name with the method name somehow.
 
-To `create a JS function for a component function` given an [instance record](#instance-records) |instance|, |componentFunc|, |name| and |takesSelf|:
+To `create a JS function for a component function` given an [instance record](#instance-records) |instance|, a non-empty List of component functions |componentFuncs| forming an overload set, |name| and |takesSelf|:
 1. Let |paramOffset| be 1 if |takesSelf| is **true**, else 0.
-1. If |componentFunc|.Result is a `result`:
-    1. Let |okType| be its `ok` payload type, or **empty** if it has none.
-1. Else:
-    1. Let |okType| be |componentFunc|.Result, or **empty** if |componentFunc| has no result.
-1. Return a built-in function object with name |name| and length |componentFunc|.Params.length - |paramOffset|, whose behaviour, given a **this** value |thisValue| and JS arguments |args|, performs:
+1. Let |length| be the smallest |componentFunc|.Params.length - |paramOffset| of each |componentFunc| of |componentFuncs|.
+1. Return a built-in function object with name |name| and length |length|, whose behaviour, given a **this** value |thisValue| and JS arguments |args|, performs:
     1. Return ? `run within a call` given |instance|.[[HostResourceTypes]], |instance|.[[GuestResourceClasses]], and a new Abstract Closure that performs the following steps when called:
+        1. Let |componentFunc| be ? `SelectOverload`(|componentFuncs|, |takesSelf|, |args|).
+        1. If |componentFunc|.Result is a `result`:
+            1. Let |okType| be its `ok` payload type, or **empty** if it has none.
+        1. Else:
+            1. Let |okType| be |componentFunc|.Result, or **empty** if |componentFunc| has no result.
         1. Let |componentResult| be ? `invoke a component function` given |instance|, |componentFunc|, |takesSelf|, |thisValue| and |args|.
         1. If |okType| is **empty**:
             1. Return **undefined**.
         1. Return `ToJSValue`(|componentResult|, |okType|).
+
+`SelectOverload(componentFuncs, takesSelf, args)` picks the overload to call, following [WebIDL overload resolution](https://webidl.spec.whatwg.org/#es-overloads):
+1. If |componentFuncs| has one element:
+    1. Return |componentFuncs|[0].
+1. Let |paramOffset| be 1 if |takesSelf| is **true**, else 0.
+1. Let |maxCount| be the largest |componentFunc|.Params.length - |paramOffset| of each |componentFunc| of |componentFuncs|.
+1. Let |count| be the smallest |componentFunc|.Params.length - |paramOffset| of each |componentFunc| of |componentFuncs| that is at least min(|maxCount|, `Length`(|args|)).
+1. Let |candidates| be the functions of |componentFuncs| with |count| + |paramOffset| parameters, in declaration order.
+1. If |candidates| has one element:
+    1. Return |candidates|[0].
+1. Let |i| be the lowest [distinguishing parameter index](Explainer.md#import-and-export-definitions) of |candidates|.
+1. Let |arg| be |args|[|i| - |paramOffset|] if it exists, else **undefined**.
+1. Let |j| be ? `SelectDistinguishableType`(|arg|, the types of the |i|th parameters of |candidates|).
+1. Return |candidates|[|j|].
+
+Extra arguments are ignored. Missing arguments select the overload with the next larger parameter count, which `invoke a component function` pads with **undefined**, just as it does for a function that is not overloaded. WebIDL instead throws a `TypeError` in this case.
 
 To `define an accessor for a component function` given an [instance record](#instance-records) |instance|, an object |target|, a function export |export| and a Boolean |enumerable|:
 1. Let |key| be `JSName`(|export|).
 1. Let |accessor| be the `accessor` capture of |export|.Name.
 1. Let |name| be the string-concatenation of |accessor|, " " and |key|.
 1. Let |takesSelf| be **true** if |export|.Name matches *Member* with `scope` "method", and **false** otherwise.
-1. Let |func| be `create a JS function for a component function` given |instance|, |export|.Func, |name| and |takesSelf|.
+1. Let |func| be `create a JS function for a component function` given |instance|, « |export|.Func », |name| and |takesSelf|.
 1. If |accessor| is "get":
     1. Perform `DefinePropertyOrThrow`(|target|, |key|, PropertyDescriptor { [[Get]]: |func|, [[Set]]: **undefined**, [[Enumerable]]: |enumerable|, [[Configurable]]: **true** }).
 1. Else:
@@ -1215,7 +1241,6 @@ A component's exports become the bindings of its module namespace object. There 
 
 ## Follow ups
 
-1. How to import multiple overloads of a function? Can we just use `external-id`?
 1. How to support class inheritance and casting?
 1. Do we support a reference equality protocol? `ToJSValue` creates a fresh resource object per lift, so two `borrow`s of one component-defined resource are two JS objects that do not compare equal. Reps are opaque and reusable after a drop, so an identity map would need careful invalidation.
 1. Do we let a JS constructor supply its own brand check?
