@@ -212,6 +212,7 @@ This section specifies that translation as two abstract operations:
 Roundtripping from `ToJSValue` back through `ToComponentValue` is designed to be strictly the identity function with the following exceptions:
   1. A `map` with duplicate keys keeps only the last pair per key (see [`ToJSValueMap`](#tojsvalue))
   1. Float NaNs are [canonicalized](CanonicalABI.md#loading)
+  1. A `union` value where imported resources overlap. See [`SelectUnionCase`](#tocomponentvalue).
 
 Every object a conversion creates, including any error it throws, belongs to the *component realm*. This is the realm of the `WebAssembly` namespace the component was instantiated through with the JS-API, or the realm the ESM was instantiated in with ESM-integration.
 
@@ -254,6 +255,7 @@ Dispatch on `componentValType`:
 - `option<T>` not nested within another `option` → **undefined** for `none`, else `ToJSValue`(the payload, T).
 - `variant`, and nested `option`, and `result` outside return position → `ToJSValueVariant`(|componentValue|, the cases). In return position a `result` is unwrapped instead, into a return value or a thrown `ComponentError` (see [Read the imports](#read-the-imports-object) and [Create the exports object](#create-the-exports-object)).
 - `map<K, V>` → `ToJSValueMap`(|componentValue|, K, V).
+- `union` → `ToJSValue`(the payload, T), where T is the payload type of the value's case.
 - `own<R>` / `borrow<R>` → See [Resource types](#resource-types).
 - `future<T>` → a Promise (TODO).
 - `stream<T>` → an `AsyncIterator` (TODO).
@@ -338,6 +340,7 @@ Dispatch on `targetComponentType`:
 - `option<T>` not nested within another `option` → **null** and **undefined** both give `none`; anything else gives `some(ToComponentValue(jsValue, T))`.
 - `variant`, and nested `option`, and `result` outside return position → ? `ToComponentValueVariant`(|jsValue|, the cases). In return position a `result` is unwrapped instead: a JS return value becomes `result.ok`, and a thrown exception becomes `result.error` (see [Read the imports](#read-the-imports-object) and [Create the exports object](#create-the-exports-object)).
 - `map<K, V>` → ? `ToComponentValueMap`(|jsValue|, K, V).
+- `union` → ? `ToComponentValueUnion`(|jsValue|, the cases).
 - `own<R>` / `borrow<R>` → See [Resource types](#resource-types).
 - `future<T>` → TODO.
 - `stream<T>` → TODO.
@@ -476,6 +479,34 @@ This operation is used for variant, and also cases in the above table where we c
 
 If the value is not iterable, we fall back to converting the object the way WebIDL's [`record<USVString, V>`](https://webidl.spec.whatwg.org/#js-record) would, for compatibility.
 
+`ToComponentValueUnion(jsValue, cases)`:
+1. Let |case| be ? `SelectUnionCase`(|jsValue|, |cases|).
+1. Let |payload| be ? `ToComponentValue`(|jsValue|, the payload type of |case|).
+1. Return a union value of |case| whose payload is |payload|.
+
+`SelectUnionCase(jsValue, cases)`:
+1. If |jsValue| is an Object:
+    1. For each case with a resource kind `R`, in declaration order:
+        1. If ? `IsResourceValue`(|jsValue|, R) is **true**:
+            1. Return that case.
+    1. If |jsValue| has a [[MapData]] internal slot, and a case has a payload type of `map<K, V>`:
+        1. Return that case.
+    1. If a case has the list kind and ? `GetMethod`(|jsValue|, `%Symbol.iterator%`) is not **undefined**:
+        1. Return that case.
+    1. If a case has the object kind:
+        1. Return that case.
+1. If |jsValue| is a Boolean, Number or BigInt, and a case has the numeric kind:
+    1. Return that case.
+1. If a case has the string kind:
+    1. Return that case.
+1. If a case has the numeric kind:
+    1. Return that case.
+1. Throw a `TypeError`.
+
+Validation ensures at most one case has a given kind, except for resource kinds when instantiation supplies the same resource type for two imports
+
+The `[[MapData]]` test comes before the iterable test because a `Map` is iterable, but `ToJSValue` produces it for a `map`.
+
 ## Resource types
 
 A component resource type can be defined in a component (i.e. a guest resource), or else as an imported abstract type (i.e. a host resource).
@@ -579,12 +610,19 @@ For a resource type `R` whose abstract type is one of the component's type impor
 - `ToComponentValue(jsValue, own<R> | borrow<R>)`:
     1. Let |abstractTypeKey| be the *abstract type key* of |R|.
     1. Let |hostType| be the current call's [[HostResourceTypes]][|abstractTypeKey|].
-    1. Let |matches| be ? `brand check` given |jsValue| and |hostType|.[[ConstructorObject]].
-    1. If |matches| is **false**:
+    1. If ? `IsResourceValue`(|jsValue|, |R|) is **false**:
         1. Throw a `TypeError`.
     1. Return a host resource value whose [[Type]] is |hostType| and whose [[JSValue]] is |jsValue|.
 
 Converting the same JS value to a host resource type yields fresh handle indices. There is no canonicalization of indices.
+
+To `IsResourceValue` given a JS value |jsValue| and a resource type |R|:
+1. Let |abstractTypeKey| be the *abstract type key* of |R|.
+1. If |abstractTypeKey| is a type import:
+    1. Let |hostType| be the current call's [[HostResourceTypes]][|abstractTypeKey|].
+    1. Return ? `brand check` given |jsValue| and |hostType|.[[ConstructorObject]].
+1. Let |class| be the current call's [[GuestResourceClasses]][|abstractTypeKey|].
+1. Return **true** if |jsValue| has a [[ResourceClass]] internal slot whose value is |class|, else **false**.
 
 ### Guest resource types (i.e. exported)
 
@@ -721,9 +759,7 @@ For a resource type `R` whose [abstract type](#abstract-and-transparent-types) i
     1. Assert: unreachable.
     1. This can only happen if an exported function returns a borrow, which is not allowed.
 - `ToComponentValue(jsValue, own<R>)`:
-    1. Let |abstractTypeKey| be the *abstract type key* of |R|.
-    1. Let |class| be the current call's [[GuestResourceClasses]][|abstractTypeKey|].
-    1. If |jsValue| does not have a [[ResourceClass]] internal slot, or |jsValue|.[[ResourceClass]] is not |class|:
+    1. If ? `IsResourceValue`(|jsValue|, |R|) is **false**:
         1. Throw a `TypeError`.
     1. If |jsValue|.[[Rep]] is **empty**, or |jsValue|.[[LendCount]] is not 0:
         1. Throw a `TypeError`.
@@ -731,9 +767,7 @@ For a resource type `R` whose [abstract type](#abstract-and-transparent-types) i
     1. Perform `detach a guest resource object` with |jsValue|.
     1. Return |rep|.
 - `ToComponentValue(jsValue, borrow<R>)`:
-    1. Let |abstractTypeKey| be the *abstract type key* of |R|.
-    1. Let |class| be the current call's [[GuestResourceClasses]][|abstractTypeKey|].
-    1. If |jsValue| does not have a [[ResourceClass]] internal slot, or |jsValue|.[[ResourceClass]] is not |class|:
+    1. If ? `IsResourceValue`(|jsValue|, |R|) is **false**:
         1. Throw a `TypeError`.
     1. If |jsValue|.[[Rep]] is **empty**:
         1. Throw a `TypeError`.
@@ -1181,7 +1215,6 @@ A component's exports become the bindings of its module namespace object. There 
 
 ## Follow ups
 
-1. How to dynamically pass a union value? Statically passing a single case of the union works, but not dynamic choice.
 1. How to import multiple overloads of a function? Can we just use `external-id`?
 1. How to support class inheritance and casting?
 1. Do we support a reference equality protocol? `ToJSValue` creates a fresh resource object per lift, so two `borrow`s of one component-defined resource are two JS objects that do not compare equal. Reps are opaque and reusable after a drop, so an identity map would need careful invalidation.

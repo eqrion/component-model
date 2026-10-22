@@ -141,6 +141,7 @@ The following table describes how a component value is converted into a JS value
 | `result<T, E>` (if in return position of function) | if `E` { thrown as a `WebAssembly.ComponentError` } else { `T` } | `T` |
 | `variant`, `option<T>`, `result<T, E>` | null-prototype object with discriminating `kind` field and optional `value` field | `{ kind: "a-b" } \| { kind: "c-d", value: T }` |
 | `map<K, V>` | `Map` | `Map<K, V>` |
+| `union { case-a(T), case-b(U) }` | the payload | `T \| U` |
 | `own<R>`, `borrow<R>` | the original JS value for an imported resource type, an instance of its class for an exported one | `R` |
 | `future<T>`, `stream<T>`, `error-context` | *not yet specified* | *not yet specified* |
 
